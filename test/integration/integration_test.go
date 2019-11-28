@@ -5,10 +5,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AlexAkulov/clickhouse-backup/pkg/chbackup"
 
 	_ "github.com/kshvakov/clickhouse"
 	"github.com/stretchr/testify/assert"
@@ -139,15 +142,10 @@ var incrementData = []TestDataStuct{
 	},
 }
 
-func TestRestoreLegacyBackupFormat(t *testing.T) {
-	ch := &ClickHouse{
-		Config: &ClickHouseConfig{
-			Host: "localhost",
-			Port: 9000,
-		},
-	}
+func testRestoreLegacyBackupFormat(t *testing.T) {
+	ch := &TestClickHouse{}
 	r := require.New(t)
-	r.NoError(ch.Connect())
+	r.NoError(ch.connect())
 	r.NoError(ch.dropDatabase(dbName))
 	fmt.Println("Generate test data")
 	for _, data := range testData {
@@ -180,27 +178,42 @@ func TestRestoreLegacyBackupFormat(t *testing.T) {
 	fmt.Println("Download")
 	r.NoError(dockerExec("clickhouse-backup", "download", "old_format"))
 
-	fmt.Println("Restore schema")
-	r.NoError(dockerExec("clickhouse-backup", "restore-schema", "old_format"))
-
-	fmt.Println("Restore data")
-	r.NoError(dockerExec("clickhouse-backup", "restore-data", "old_format"))
+	fmt.Println("Restore")
+	r.NoError(dockerExec("clickhouse-backup", "restore", "-t", dbName+".*", "old_format"))
 
 	fmt.Println("Check data")
 	for i := range testData {
 		r.NoError(ch.checkData(t, testData[i]))
 	}
+	fmt.Println("Clean")
+	r.NoError(dockerExec("/bin/rm", "-rf", "/var/lib/clickhouse/backup/old_format", "/var/lib/clickhouse/backup/increment_old_format", "/var/lib/clickhouse/shadow"))
+	r.NoError(dockerExec("clickhouse-backup", "delete", "remote", "old_format.tar.gz"))
 }
 
-func TestIntegration(t *testing.T) {
-	ch := &ClickHouse{
-		Config: &ClickHouseConfig{
-			Host: "localhost",
-			Port: 9000,
-		},
+func TestIntegrationS3(t *testing.T) {
+	r := require.New(t)
+	r.NoError(dockerCP("config-s3.yml", "/etc/clickhouse-backup/config.yml"))
+	testRestoreLegacyBackupFormat(t)
+	testCommon(t)
+}
+
+func TestIntegrationGCS(t *testing.T) {
+	if os.Getenv("GCS_TESTS") == "" || os.Getenv("TRAVIS_PULL_REQUEST") != "false" {
+		t.Skip("Skipping GCS integration tests...")
+		return
 	}
 	r := require.New(t)
-	r.NoError(ch.Connect())
+	r.NoError(dockerCP("config-gcs.yml", "/etc/clickhouse-backup/config.yml"))
+	r.NoError(dockerExec("apt-get", "-y", "update"))
+	r.NoError(dockerExec("apt-get", "-y", "install", "ca-certificates"))
+	testRestoreLegacyBackupFormat(t)
+	testCommon(t)
+}
+
+func testCommon(t *testing.T) {
+	ch := &TestClickHouse{}
+	r := require.New(t)
+	r.NoError(ch.connect())
 	r.NoError(ch.dropDatabase(dbName))
 	fmt.Println("Generate test data")
 	for _, data := range testData {
@@ -232,10 +245,10 @@ func TestIntegration(t *testing.T) {
 	r.NoError(dockerExec("clickhouse-backup", "download", "test_backup"))
 
 	fmt.Println("Restore schema")
-	r.NoError(dockerExec("clickhouse-backup", "restore-schema", "test_backup"))
+	r.NoError(dockerExec("clickhouse-backup", "restore", "--schema", "test_backup"))
 
 	fmt.Println("Restore data")
-	r.NoError(dockerExec("clickhouse-backup", "restore-data", "test_backup"))
+	r.NoError(dockerExec("clickhouse-backup", "restore", "--data", "test_backup"))
 
 	fmt.Println("Check data")
 	for i := range testData {
@@ -253,11 +266,8 @@ func TestIntegration(t *testing.T) {
 	fmt.Println("Download increment")
 	r.NoError(dockerExec("clickhouse-backup", "download", "increment"))
 
-	fmt.Println("Restore schema")
-	r.NoError(dockerExec("clickhouse-backup", "restore-schema", "increment"))
-
-	fmt.Println("Restore data")
-	r.NoError(dockerExec("clickhouse-backup", "restore-data", "increment"))
+	fmt.Println("Restore")
+	r.NoError(dockerExec("clickhouse-backup", "restore", "--schema", "--data", "increment"))
 
 	fmt.Println("Check increment data")
 	for i := range testData {
@@ -265,13 +275,32 @@ func TestIntegration(t *testing.T) {
 		ti.Rows = append(ti.Rows, incrementData[i].Rows...)
 		r.NoError(ch.checkData(t, ti))
 	}
+
+	fmt.Println("Clean")
+	r.NoError(dockerExec("/bin/rm", "-rf", "/var/lib/clickhouse/backup/test_backup", "/var/lib/clickhouse/backup/increment"))
+	r.NoError(dockerExec("clickhouse-backup", "delete", "remote", "test_backup.tar.gz"))
+	r.NoError(dockerExec("clickhouse-backup", "delete", "remote", "increment.tar.gz"))
 }
 
-func (ch *ClickHouse) createTestData(data TestDataStuct) error {
-	if err := ch.CreateDatabase(data.Database); err != nil {
+type TestClickHouse struct {
+	chbackup *chbackup.ClickHouse
+}
+
+func (ch *TestClickHouse) connect() error {
+	ch.chbackup = &chbackup.ClickHouse{
+		Config: &chbackup.ClickHouseConfig{
+			Host: "localhost",
+			Port: 9000,
+		},
+	}
+	return ch.chbackup.Connect()
+}
+
+func (ch *TestClickHouse) createTestData(data TestDataStuct) error {
+	if err := ch.chbackup.CreateDatabase(data.Database); err != nil {
 		return err
 	}
-	if err := ch.CreateTable(RestoreTable{
+	if err := ch.chbackup.CreateTable(chbackup.RestoreTable{
 		Database: data.Database,
 		Table:    data.Table,
 		Query:    fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s`.`%s` %s", data.Database, data.Table, data.Schema),
@@ -280,7 +309,7 @@ func (ch *ClickHouse) createTestData(data TestDataStuct) error {
 	}
 
 	for _, row := range data.Rows {
-		tx, err := ch.conn.Beginx()
+		tx, err := ch.chbackup.GetConn().Beginx()
 		if err != nil {
 			return fmt.Errorf("can't begin transaction with: %v", err)
 		}
@@ -300,15 +329,15 @@ func (ch *ClickHouse) createTestData(data TestDataStuct) error {
 	return nil
 }
 
-func (ch *ClickHouse) dropDatabase(database string) error {
+func (ch *TestClickHouse) dropDatabase(database string) error {
 	fmt.Println("DROP DATABASE IF EXISTS ", database)
-	_, err := ch.conn.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", database))
+	_, err := ch.chbackup.GetConn().Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", database))
 	return err
 }
 
-func (ch *ClickHouse) checkData(t *testing.T, data TestDataStuct) error {
+func (ch *TestClickHouse) checkData(t *testing.T, data TestDataStuct) error {
 	fmt.Printf("Check '%d' rows in '%s.%s'\n", len(data.Rows), data.Database, data.Table)
-	rows, err := ch.conn.Queryx(fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY %s", data.Database, data.Table, data.OrderBy))
+	rows, err := ch.chbackup.GetConn().Queryx(fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY %s", data.Database, data.Table, data.OrderBy))
 	if err != nil {
 		return err
 	}
@@ -329,7 +358,7 @@ func (ch *ClickHouse) checkData(t *testing.T, data TestDataStuct) error {
 
 func dockerExec(cmd ...string) error {
 	out, err := dockerExecOut(cmd...)
-	fmt.Println(string(out))
+	fmt.Print(string(out))
 	return err
 }
 
@@ -340,6 +369,15 @@ func dockerExecOut(cmd ...string) (string, error) {
 	out, err := exec.CommandContext(ctx, "docker", dcmd...).CombinedOutput()
 	cancel()
 	return string(out), err
+}
+
+func dockerCP(src, dst string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	dcmd := []string{"cp", src, "clickhouse:" + dst}
+	out, err := exec.CommandContext(ctx, "docker", dcmd...).CombinedOutput()
+	fmt.Println(string(out))
+	cancel()
+	return err
 }
 
 func toDate(s string) time.Time {

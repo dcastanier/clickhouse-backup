@@ -1,6 +1,7 @@
 module github.com/AlexAkulov/clickhouse-backup
 
 require (
+	cloud.google.com/go/storage v1.1.0
 	github.com/aws/aws-sdk-go v1.23.21
 	github.com/bkaradzic/go-lz4 v1.0.0 // indirect
 	github.com/cloudflare/golz4 v0.0.0-20150217214814-ef862a3cdc58 // indirect
@@ -15,10 +16,11 @@ require (
 	github.com/mattn/go-runewidth v0.0.3 // indirect
 	github.com/mholt/archiver v1.1.3-0.20190812163345-2d1449806793
 	github.com/pierrec/lz4 v2.3.1-0.20190907084430-0554902aa74a+incompatible // indirect
+	github.com/pkg/errors v0.8.1
 	github.com/stretchr/testify v1.3.0
 	github.com/urfave/cli v1.20.0
-	golang.org/x/net v0.0.0-20190311183353-d8887717615a // indirect
-	google.golang.org/appengine v1.5.0 // indirect
+	golang.org/x/tools v0.0.0-20190918214516-5a1a30219888 // indirect
+	google.golang.org/api v0.9.0
 	gopkg.in/cheggaaa/pb.v1 v1.0.28
 	gopkg.in/djherbis/buffer.v1 v1.1.0
 	gopkg.in/djherbis/nio.v2 v2.0.3
